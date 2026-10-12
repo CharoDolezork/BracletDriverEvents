@@ -1,8 +1,6 @@
 ﻿using OpenCvSharp;
 
 namespace BracletDriver;
-
-
 internal sealed class Guidance : IDisposable
 {
     public enum Stage
@@ -34,9 +32,14 @@ internal sealed class Guidance : IDisposable
 
     private long _readyAt;
 
+    private Stage _stopAfter;
+    private bool _rememberRodExposure;
+    private bool _useSavedCalibration;
+
     private int _lostFrames;
     private int _steps;
     private Point2d _target;
+    private double _probeReference;
 
     private int _calibMotor;
     private bool _calibProbed;
@@ -58,12 +61,36 @@ internal sealed class Guidance : IDisposable
         _driver.MoveDone += OnMoveDone;
     }
 
-    public Stage CurrentStage { get; private set; } = Stage.Idle;
+    private Stage _stage = Stage.Idle;
+    private long _stageStartedAt;
 
-    public void Start()
+    public Stage CurrentStage
     {
-        if (Running) return;
+        get => _stage;
+        private set
+        {
+            if (value == _stage) return;
 
+            if (_stage != Stage.Idle)
+                _log.Log($"Стадия {_stage}: {Clock.Since(_stageStartedAt) / 1000.0:F1} с.");
+
+            _stage = value;
+            _stageStartedAt = Clock.Ms;
+        }
+    }
+
+
+    public bool Start(Stage stopAfter, out string? error, bool rememberRodExposure = false)
+    {
+        error = null;
+        if (Running) return false;
+
+        // Подход и спуск идут по таблице из файла, пробные ходы делает только прогон «до калибровки»
+        _useSavedCalibration = stopAfter > Stage.Calibration;
+        if (_useSavedCalibration && !_model.TryLoad(Options.CalibrationPath, out error)) return false;
+
+        _stopAfter = stopAfter;
+        _rememberRodExposure = rememberRodExposure;
         _readyAt = 0;
         _lostFrames = 0;
         _steps = 0;
@@ -71,10 +98,10 @@ internal sealed class Guidance : IDisposable
         _appliedMove = null;
         CurrentStage = Stage.Baseline;
 
-        _analyzer.Enabled = true;
         Running = true;
 
-        _log.Log("Наведение: старт.");
+        _log.Log($"Наведение: старт (до стадии {stopAfter}).");
+        return true;
     }
 
     public void Stop()
@@ -99,9 +126,16 @@ internal sealed class Guidance : IDisposable
     private void Release()
     {
         CurrentStage = Stage.Idle;
-        _analyzer.Enabled = false;
-        _analyzer.HoleSearchEnabled = true;
-        _analyzer.RodSearchEnabled = false;
+        _analyzer.ResetSearch();
+    }
+
+    // Прогон до этой стадии закончен — останавливаемся
+    private bool StopsAfter(Stage stage)
+    {
+        if (_stopAfter != stage) return false;
+
+        Finish($"стадия {stage} пройдена.");
+        return true;
     }
 
     private void OnMoveDone(bool success)
@@ -120,32 +154,34 @@ internal sealed class Guidance : IDisposable
     private void OnFrameAnalyzed(FrameAnalysis frame)
     {
         if (!Running) return;
-        if (frame.Frame.Timestamp < Volatile.Read(ref _readyAt)) return;
+        if (frame.Timestamp < Volatile.Read(ref _readyAt)) return;
         if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0) return;
-
-        var hole = frame.Hole;
-        var rodTip = frame.RodTip;
-        double brightShare = frame.BrightShare;
 
         Task.Run(() =>
         {
-            try { Process(hole, rodTip, brightShare); }
+            try { Process(frame); }
             catch (Exception ex) { Finish($"ошибка: {ex.Message}"); }
             finally { Volatile.Write(ref _busy, 0); }
         });
     }
 
-    private void Process(Point2d? hole, Point2d? rodTip, double brightShare)
+    private void Process(FrameAnalysis frame)
     {
         switch (CurrentStage)
         {
             case Stage.Baseline: GoToBaseline(); break;
-            case Stage.Target: SelectTarget(hole); break;
-            case Stage.Exposure: TuneExposure(brightShare); break;
-            case Stage.Calibration: Calibrate(rodTip); break;
+            case Stage.Target: SelectTarget(frame.Hole); break;
+            case Stage.Exposure: TuneExposure(frame.Exposure, frame.MaxBrightness, frame.ProbeBrightness); break;
+            case Stage.Calibration: Calibrate(frame.RodTip, frame.ProbeBrightness); break;
             case Stage.Approach:
-            case Stage.Descent: Guide(rodTip); break;
+            case Stage.Descent: Guide(frame.RodTip, frame.ProbeBrightness); break;
         }
+    }
+
+    private double SlowdownFactor(double delta)
+    {
+        double t = (delta - _opt.GuidanceSlowdownStart) / (_opt.GuidanceSlowdownFull - _opt.GuidanceSlowdownStart);
+        return 1 - Math.Clamp(t, 0, 1) * (1 - _opt.GuidanceMinStepFraction);
     }
 
     private void GoToBaseline()
@@ -158,13 +194,14 @@ internal sealed class Guidance : IDisposable
 
         _analyzer.HoleSearchEnabled = true;
         _analyzer.RodSearchEnabled = false;
-        _camera.SetExposure(_opt.CameraExposureStart);
+        _camera.SetExposure(_opt.HoleExposure);
 
         _log.Log("Наведение: перевод в эталонную позицию.");
-        CurrentStage = Stage.Target;
 
         if (!Running) return;
         _driver.GoTo(_opt.RodBaselinePosition);
+
+        if (Running) CurrentStage = Stage.Target;
     }
 
     private void SelectTarget(Point2d? hole)
@@ -176,22 +213,37 @@ internal sealed class Guidance : IDisposable
         }
 
         _target = target;
+        _analyzer.Target = target;
         _lostFrames = 0;
         _analyzer.HoleSearchEnabled = false;
 
-        _log.Log($"Цель выбрана: ({_target.X:F1}, {_target.Y:F1}). Подбираю выдержку.");
+        _log.Log($"Цель выбрана: ({_target.X:F1}, {_target.Y:F1}).");
+        if (StopsAfter(Stage.Target)) return;
+
+ 
+        int rodExposure = _rememberRodExposure ? _opt.CameraExposureStart : _opt.RodExposure;
+        if (_camera.CurrentExposure != rodExposure)
+        {
+            _camera.SetExposure(rodExposure);
+            Volatile.Write(ref _readyAt, Clock.After(_opt.GuidanceSettleMs));
+        }
+
+        _log.Log("Подбираю выдержку.");
         CurrentStage = Stage.Exposure;
     }
 
-    private void TuneExposure(double brightShare)
+    private void TuneExposure(int exposure, double maxBrightness, double probe)
     {
-        if (brightShare > _opt.ExposureBrightShareLimit)
+        // Кадр снят до смены выдержки — по нему решать нельзя
+        if (exposure != _camera.CurrentExposure) return;
+
+        if (maxBrightness >= _opt.RodBrightThreshold)
         {
             int next = _camera.CurrentExposure - 1;
             if (next < _opt.CameraExposureMin)
             {
                 Finish($"выдержка на пределе ({_camera.CurrentExposure}), " +
-                       $"а ярких пикселей всё ещё {brightShare:P2}.");
+                       $"а самый яркий пиксель всё ещё {maxBrightness:F0}.");
                 return;
             }
 
@@ -199,11 +251,26 @@ internal sealed class Guidance : IDisposable
             return;
         }
 
-        _log.Log($"Выдержка подобрана ({_camera.CurrentExposure}), ярких пикселей {brightShare:P2}. " +
-                 "Выдвигаю стержень.");
+        if (double.IsNaN(probe)) return;
+
+        _probeReference = probe;
+        _log.Log($"Выдержка подобрана ({_camera.CurrentExposure}), самый яркий пиксель {maxBrightness:F0}, " +
+                 $"окно яркости {probe:F0}.");
+
+        if (_rememberRodExposure)
+        {
+            _opt.RodExposure = _camera.CurrentExposure;
+            _log.Log($"Выдержка для стержня запомнена: {_opt.RodExposure}.");
+            if (!_opt.Save(out string? error)) _log.Log(error!);
+        }
+
+        if (StopsAfter(Stage.Exposure)) return;
+
+        _log.Log("Выдвигаю стержень.");
 
         _analyzer.RodSearchEnabled = true;
-        _calibMotor = 0;
+        // С сохранённой таблицей пробные ходы не нужны: стержень только выезжает в «Рамку»
+        _calibMotor = _useSavedCalibration ? _driver.MotorCount : 0;
         _calibProbed = false;
         CurrentStage = Stage.Calibration;
 
@@ -211,7 +278,7 @@ internal sealed class Guidance : IDisposable
         _driver.GoTo(_opt.RodRoiPosition);
     }
 
-    private void Calibrate(Point2d? rodTip)
+    private void Calibrate(Point2d? rodTip, double probeBrightness)
     {
         if (rodTip is not { } tip)
         {
@@ -237,9 +304,20 @@ internal sealed class Guidance : IDisposable
 
         if (_calibMotor == _driver.MotorCount)
         {
-            _log.Log($"Калибровка закончена. Таблица: {_model}.");
+            if (_useSavedCalibration)
+            {
+                _log.Log($"Калибровка из файла. Таблица: {_model}.");
+            }
+            else
+            {
+                _log.Log($"Калибровка закончена. Таблица: {_model}.");
+                SaveCalibration();
+            }
+
+            if (StopsAfter(Stage.Calibration)) return;
+
             CurrentStage = Stage.Approach;
-            Guide(rodTip);
+            Guide(rodTip, probeBrightness);
             return;
         }
 
@@ -250,6 +328,19 @@ internal sealed class Guidance : IDisposable
         _driver.Step(Probe(_calibMotor, probe));
     }
 
+    private void SaveCalibration()
+    {
+        try
+        {
+            _model.Save(Options.CalibrationPath);
+            _log.Log($"Калибровка сохранена: {Options.CalibrationPath}");
+        }
+        catch (Exception ex)
+        {
+            _log.Log($"Не удалось сохранить калибровку: {ex.Message}");
+        }
+    }
+
     private double[] Probe(int motor, double step)
     {
         var vector = new double[_driver.MotorCount];
@@ -257,7 +348,7 @@ internal sealed class Guidance : IDisposable
         return vector;
     }
 
-    private void Guide(Point2d? rodTip)
+    private void Guide(Point2d? rodTip, double probe)
     {
         if (rodTip is not { } tip)
         {
@@ -306,9 +397,14 @@ internal sealed class Guidance : IDisposable
             return;
         }
 
+        double delta = probe - _probeReference;
+        double factor = SlowdownFactor(delta);
+        for (int i = 0; i < step.Length; i++) step[i] *= factor;
+
         _steps++;
         _log.Log($"Шаг {_steps} ({(miss > _opt.GuidanceOnRayRadius ? "к лучу" : "спуск")}): " +
-                 $"промах {miss:F1} px, ход [{string.Join(", ", step.Select(s => s.ToString("F0")))}].");
+                 $"промах {miss:F1} px, окно Δ{delta:F0} → шаг ×{factor:F2}, " +
+                 $"ход [{string.Join(", ", step.Select(s => s.ToString("F0")))}].");
 
         if (!Running) return;
 

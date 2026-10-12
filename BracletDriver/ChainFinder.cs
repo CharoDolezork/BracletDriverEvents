@@ -1,9 +1,7 @@
 ﻿using OpenCvSharp;
 
 namespace BracletDriver;
-
-// Сборка пятен в цепочки — ряды отверстий одного браслета.
-public static class ChainFinder
+internal static class ChainFinder
 {
     // От каждого свободного пятна пробуем все направления и оставляем самую длинную цепочку.
     public static List<Chain> Find(List<Candidate> cands, Options opt)
@@ -29,9 +27,9 @@ public static class ChainFinder
                 var chain = ToChain(points);
                 if (chain.AverageStep < opt.MinChainAverageStep || chain.AverageStep > opt.MaxChainAverageStep) continue;
 
-                if (best == null || chain.Count > best.Count) best = chain;
+                if (best is null || chain.Count > best.Count) best = chain;
             }
-            if (best == null) continue;
+            if (best is null) continue;
 
             foreach (var c in best.Points) used.Add(c);
             chains.Add(best);
@@ -50,7 +48,6 @@ public static class ChainFinder
 
         return longest?.Points[0];
     }
-
 
     private static List<Candidate> BuildChain(SpatialGrid grid, HashSet<Candidate> used, Candidate a, Candidate b, Options opt)
     {
@@ -102,7 +99,7 @@ public static class ChainFinder
                 }
             }
 
-            if (next == null) break;
+            if (next is null) break;
 
             chain.Add(next);
             localUsed.Add(next);
@@ -176,7 +173,7 @@ public static class ChainFinder
 }
 
 // Цепочка отверстий и её средний шаг в пикселях.
-public sealed class Chain
+internal sealed class Chain
 {
     public required List<Candidate> Points { get; init; }
     public required int AverageStep { get; init; }

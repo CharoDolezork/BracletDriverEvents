@@ -1,9 +1,7 @@
 ﻿namespace BracletDriver;
-
-
-public sealed class SerialRodDriver
+internal sealed class SerialRodDriver
 {
-    private const int Motors = 3;
+    public const int Motors = 3;
 
     // Как часто переспрашивать статус
     private const int StatusPollMs = 100;
@@ -27,8 +25,7 @@ public sealed class SerialRodDriver
         _log = log;
     }
 
-    // Ход закончен: true — плата подтвердила остановку, false — так и не ответила.
-    // Вызывается в том потоке, который вызвал Step/GoTo, до того как они вернут управление.
+
     public event Action<bool>? MoveDone;
 
     public int MotorCount => Motors;
@@ -37,7 +34,6 @@ public sealed class SerialRodDriver
 
     // Отправленная позиция на плату
     public int[] Position => _sent;
-
 
     public bool TryStart()
     {
@@ -64,7 +60,6 @@ public sealed class SerialRodDriver
         _log.Log($"Исходные позиции моторов: {string.Join(", ", _sent)}.");
         return true;
     }
-
 
     public void Step(double[] step, int? speed = null)
     {
@@ -95,6 +90,10 @@ public sealed class SerialRodDriver
     // Плавный останов. Можно вызывать из любого потока — идущий Step/GoTo дождётся остановки и вернётся.
     public void Stop() => _port.StopSmooth();
 
+    public void EnableMotors() => _port.EnableMotors();
+
+    public void DisableMotors() => _port.DisableMotors();
+
     // Отправляет ход и ждёт его окончания
     private void Move(int? speed)
     {
@@ -118,8 +117,8 @@ public sealed class SerialRodDriver
 
         _log.Log("Плата не прислала «U» — спрашиваю статус.");
 
-        long deadline = Environment.TickCount64 + StatusFallbackMs;
-        while (Environment.TickCount64 < deadline)
+        long deadline = Clock.After(StatusFallbackMs);
+        while (!Clock.Passed(deadline))
         {
             if (_port.QueryStatus(StatusPollMs) && _port.Status == RodStatus.Idle) return true;
 

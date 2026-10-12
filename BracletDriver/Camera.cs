@@ -8,7 +8,6 @@ using VideoCapture = OpenCvSharp.VideoCapture;
 using VideoCaptureAPIs = OpenCvSharp.VideoCaptureAPIs;
 
 namespace BracletDriver;
-
 internal sealed class Camera : IDisposable
 {
     // Для проверки что выдержку менять не надо
@@ -24,10 +23,13 @@ internal sealed class Camera : IDisposable
     private Task? _readLoop;
 
     public Camera(ProgressLog log) => _log = log;
+
     public event Action<CameraFrame>? FrameReceived;
+
     public bool IsOpen => _videoCapture?.IsOpened() ?? false;
     public long FrameNumber => Interlocked.Read(ref _frameNumber);
     public int CurrentExposure => Volatile.Read(ref _currentExposure);
+
     public void SetExposure(int value) => Volatile.Write(ref _pendingExposure, value);
 
     public bool Open(Options opt)
@@ -55,9 +57,9 @@ internal sealed class Camera : IDisposable
         vc.AutoFocus = opt.CameraAutoFocus;
         if (!opt.CameraAutoFocus) vc.Focus = opt.CameraFocus;
 
-        vc.Set(VideoCaptureProperties.AutoExposure, opt.CameraManualExposureValue);
+        vc.AutoExposure = opt.CameraManualExposureValue;
         vc.Set(VideoCaptureProperties.AutoWB, 0);
-        vc.Set(VideoCaptureProperties.Exposure, opt.CameraExposureStart);
+        vc.Exposure = opt.CameraExposureStart;
         Volatile.Write(ref _currentExposure, (int)vc.Get(VideoCaptureProperties.Exposure));
 
         _videoCapture = vc;
@@ -91,7 +93,6 @@ internal sealed class Camera : IDisposable
     private void ReadLoop(VideoCapture capture, Options opt, CancellationToken token)
     {
         using var frame = new Mat();
-        var resolved = Roi.Resolve(opt.Roi, new Size(opt.Roi.Width, opt.Roi.Height)); // исправить на просто Mat
         // Добавить в форму постройку ROI по 2-ум точкам (Кликам мышки по превью)
         int skipFrames = 0;
 
@@ -99,7 +100,6 @@ internal sealed class Camera : IDisposable
         {
             try
             {
-
                 int pending = Interlocked.Exchange(ref _pendingExposure, NoExposure);
                 if (pending != NoExposure)
                 {
@@ -125,10 +125,9 @@ internal sealed class Camera : IDisposable
                     continue;
                 }
 
-                using var view = new Mat(frame, resolved);
-                FrameReceived?.Invoke(new CameraFrame(view, number, Clock.Ms));
+                FrameReceived?.Invoke(new CameraFrame(frame, number, Clock.Ms, Volatile.Read(ref _currentExposure)));
             }
-            catch (Exception ex) 
+            catch (Exception ex)
             {
                 _log.Log($"Ошибка в цикле чтения камеры: {ex.Message}");
                 token.WaitHandle.WaitOne(opt.CameraRetryDelayMs);
@@ -154,7 +153,7 @@ internal sealed class Camera : IDisposable
     }
 }
 
-public sealed record CameraFrame(Mat Frame, long FrameNumber, long Timestamp) : IDisposable
+internal sealed record CameraFrame(Mat Frame, long FrameNumber, long Timestamp, int Exposure) : IDisposable
 {
     public void Dispose() => Frame.Dispose();
 }

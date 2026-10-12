@@ -1,5 +1,4 @@
 ﻿namespace BracletDriver;
-
 internal static class Program
 {
     [STAThread]

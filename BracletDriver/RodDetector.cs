@@ -4,31 +4,34 @@ using Point = OpenCvSharp.Point;
 using Size = OpenCvSharp.Size;
 
 namespace BracletDriver;
-
-public sealed class RodDetector : IDisposable
+internal sealed class RodDetector : IDisposable
 {
     private readonly Options _opt;
-    private readonly ProgressLog _log;
     private readonly Mat _channel = new();
+    private readonly Mat _blurred = new();
     private readonly Mat _mask = new();
     private readonly Mat _skeleton = new();
     private readonly Mat _openKernel;
-    public RodDetector(Options opt, ProgressLog log)
+
+    public RodDetector(Options opt)
     {
         _opt = opt;
-        _log = log;
         _openKernel = Cv2.GetStructuringElement(
             MorphShapes.Ellipse, new Size(opt.MorphKernelSize, opt.MorphKernelSize));
     }
 
-    public (Point2d? RodTip, double BrightShare) Detect(Mat frame, bool findTip)
+    public (Point2d? RodTip, double MaxBrightness) Detect(Mat frame, bool findTip)
     {
         Cv2.ExtractChannel(frame, _channel, _opt.RodChannel); // номер 1
+
+        if (!findTip)
+        {
+            Cv2.MedianBlur(_channel, _blurred, _opt.ExposureMedianKernelSize);
+            Cv2.MinMaxLoc(_blurred, out _, out double maxBrightness);
+            return (null, maxBrightness);
+        }
+
         Cv2.Threshold(_channel, _mask, _opt.RodBrightThreshold, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu); // Отцу
-
-        double brightShare = Cv2.CountNonZero(_mask) / (double)(_mask.Rows * _mask.Cols);
-
-        if (!findTip) return (null, brightShare);
 
         Cv2.MorphologyEx(_mask, _mask, MorphTypes.Open, _openKernel);
         Cv2.MorphologyEx(_mask, _mask, MorphTypes.Close, _openKernel);
@@ -43,7 +46,7 @@ public sealed class RodDetector : IDisposable
         int count = Cv2.ConnectedComponentsWithStats(
             _skeleton, labels, stats, centroids, PixelConnectivity.Connectivity8);
 
-        return (FindTip(labels, stats, count), brightShare);
+        return (FindTip(labels, stats, count), 0);
     }
 
     private Point2d? FindTip(Mat labels, Mat stats, int count)
@@ -51,23 +54,23 @@ public sealed class RodDetector : IDisposable
         var side = _opt.RodTipSide;
         bool vertical = side is Side.Up or Side.Down;
 
-        double bestElongation = double.MinValue;
+        double bestLength = double.MinValue;
         int bestLabel = 0;
 
         for (int label = 1; label < count; label++)
         {
             int width = stats.At<int>(label, 2);
             int height = stats.At<int>(label, 3);
+            int length = stats.At<int>(label, 4);
 
-            double elongation = vertical
-                ? (double)height / width
-                : (double)width / height;
+            bool elongated = vertical
+                ? height > width
+                : width > height;
 
-            if (elongation > bestElongation)
-            {
-                bestElongation = elongation;
-                bestLabel = label;
-            }
+            if (!elongated || length <= bestLength) continue;
+
+            bestLength = length;
+            bestLabel = label;
         }
 
         if (bestLabel == 0) return null;
@@ -119,6 +122,7 @@ public sealed class RodDetector : IDisposable
     public void Dispose()
     {
         _channel.Dispose();
+        _blurred.Dispose();
         _mask.Dispose();
         _skeleton.Dispose();
         _openKernel.Dispose();

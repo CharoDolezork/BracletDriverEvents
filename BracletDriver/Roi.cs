@@ -2,9 +2,7 @@
 using Size = OpenCvSharp.Size;
 
 namespace BracletDriver;
-
-// Приведение настроенной рамки к конкретному кадру.
-public static class Roi
+internal static class Roi
 {
     // Ненастроенная рамка — весь кадр; настроенная обрезается по его границам.
     public static Rect Resolve(Rect roi, Size frame)

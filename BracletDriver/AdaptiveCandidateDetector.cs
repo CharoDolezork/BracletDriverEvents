@@ -1,11 +1,7 @@
 ﻿using OpenCvSharp;
 
 namespace BracletDriver;
-
-// Кандидаты в отверстия через адаптивный порог: пиксель сравнивается не с одним числом на весь
-// кадр, а со средней яркостью своего окна. Поэтому тени и блики не заливают маску целиком —
-// выделяется только то, что заметно темнее своих соседей.
-public static class AdaptiveCandidateDetector
+internal static class AdaptiveCandidateDetector
 {
     public static List<Candidate> Detect(Mat grayIn, Options opt)
     {
@@ -28,8 +24,6 @@ public static class AdaptiveCandidateDetector
             int area = stats.At<int>(label, 4);
             if (area < opt.AdaptiveMinArea || area > opt.AdaptiveMaxArea) continue;
 
-            // Отверстие — компактное круглое пятно, прожилки дерева — вытянутые штрихи.
-            // Отсекаются и по отношению сторон рамки, и по тому, какую её долю занимает пятно.
             double aspect = (double)Math.Max(width, height) / Math.Min(width, height);
             if (aspect > opt.AdaptiveMaxAspect) continue;
 

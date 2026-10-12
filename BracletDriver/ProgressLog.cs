@@ -1,7 +1,5 @@
 ﻿namespace BracletDriver;
-
-
-public sealed class ProgressLog
+internal sealed class ProgressLog
 {
     private readonly TextBox _box;
 

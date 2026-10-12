@@ -2,8 +2,7 @@
 using System.IO.Ports;
 
 namespace BracletDriver;
-
-public enum RodStatus
+internal enum RodStatus
 {
     Unknown = -1,
     Idle = 0,
@@ -18,11 +17,12 @@ public enum RodStatus
 //   T ш1 ш2 ш3 скорость   цель в шагах (абсолютная) и скорость, начать движение
 //   P                     запросить статус
 //   S / B / R             останов плавный / резкий / продолжить
+//   E / D                 моторы включить / выключить
 //
 //   G x y z velocity
 //   Q v1 v2 v3 a=5000
 
-public sealed class RodPort : IDisposable
+internal sealed class RodPort : IDisposable
 {
     private readonly ProgressLog _log;
     private readonly ManualResetEventSlim _moveDone = new(false);
@@ -38,7 +38,6 @@ public sealed class RodPort : IDisposable
     public RodStatus Status { get; private set; } = RodStatus.Unknown;
 
     public int[] Position { get; private set; } = [];
-
 
     public bool Open(Options opt)
     {
@@ -137,6 +136,10 @@ public sealed class RodPort : IDisposable
     public void Brake() => Send("B");
 
     public void Resume() => Send("R");
+
+    public void EnableMotors() => Send("E");
+
+    public void DisableMotors() => Send("D");
 
     private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
     {
